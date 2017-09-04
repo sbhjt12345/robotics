@@ -1,0 +1,16 @@
+<!-- Launch the framework code for problem 5a on HW1 -->
+<launch>
+  <node name="turtlesim_node" pkg="turtlesim" type="turtlesim_node"/>
+  <node name="p5a" pkg="hw1" type="p5a.py" args="1 10 turone"/>
+  <node name="p5aa" pkg="hw1" type="p5a.py" args="1.5 9.5 tur2"/>
+  <node name="p53a" pkg="hw1" type="p5a.py" args="2 9 tur3"/>
+  <node name="p54a" pkg="hw1" type="p5a.py" args="2.5 8.5 tur4"/>
+  <node name="p55a" pkg="hw1" type="p5a.py" args="3 8 tur5"/>
+  <node name="p56a" pkg="hw1" type="p5a.py" args="3.5 7.5 tur6"/>
+  <node name="p57a" pkg="hw1" type="p5a.py" args="4 7 tur7"/>
+  <node name="p58a" pkg="hw1" type="p5a.py" args="4.5 6.5 tur8"/>
+  <node name="p59a" pkg="hw1" type="p5a.py" args="5 6 tur9"/>
+</launch>
+
+
+
