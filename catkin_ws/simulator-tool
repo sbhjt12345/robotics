@@ -1,0 +1,327 @@
+#!/usr/bin/python3
+'''Download, update, and run provided code for programming assignments in Foundations of Robotics'''
+
+import logging
+import os
+import re
+import shlex
+import shutil
+import signal
+import stat
+import sys
+from concurrent.futures import ThreadPoolExecutor, wait
+from subprocess import run as sub_run
+from subprocess import PIPE, Popen, TimeoutExpired
+
+# Fix import error (maybe a pip bug?)
+SITE_PACKAGES_PATH = '{}/.local/lib/python{}/site-packages'.format(
+    os.path.expanduser('~'), '.'.join(map(str, sys.version_info[:2])))
+
+if not os.path.isdir(SITE_PACKAGES_PATH):
+  os.makedirs(SITE_PACKAGES_PATH)
+  sys.path.append(SITE_PACKAGES_PATH)
+
+# Ensure coloredlogs is installed (for colored log output)
+try:
+  import coloredlogs
+except ImportError as err:
+  if 'No module named \'coloredlogs\'' in err.msg:
+    sub_run('pip3 install --user coloredlogs'.split(), check=True)
+    import coloredlogs
+  else:
+    raise ImportError('Something other than a missing module is wrong: {}'.format(err.msg))
+
+# Ensure click is installed (for the CLI)
+try:
+  import click
+except ImportError as err:
+  if 'No module named \'click\'' in err.msg:
+    sub_run('pip3 install --user click'.split(), check=True)
+    import click
+  else:
+    raise ImportError('Something other than a missing module is wrong: {}'.format(err.msg))
+
+# Ensure pytoml is installed (for config file parsing)
+try:
+  import pytoml
+except ImportError as err:
+  if 'No module named \'pytoml\'' in err.msg:
+    sub_run('pip3 install --user pytoml'.split(), check=True)
+    import pytoml
+  else:
+    raise ImportError('Something other than a missing module is wrong: {}'.format(err.msg))
+
+# Setup logs
+logging.basicConfig()
+coloredlogs.install(level='INFO', fmt='%(name)s @ [%(asctime)s] %(levelname)s:\t%(message)s')
+
+
+# Constants
+SIGS_PATTERN = re.compile(r'\.sigs')
+TOOL_PATTERN = re.compile('simulator-tool')
+WORKSPACE_ROOT_PATTERN = re.compile(r'\.catkin_workspace')
+WORKSPACE_SRC_PATTERN = re.compile('src')
+
+EXIT_UPDATED = 1
+EXIT_WORKSPACE = 2
+
+
+def find_path(pattern):
+  '''Utility function to find the path to a certain filename pattern in parent directories'''
+  def search_up(path):
+    '''Recursion helper'''
+    for fname in os.listdir(path):
+      if pattern.match(fname):
+        # Note that we return the first matching file
+        return os.path.join(path, fname)
+
+    parent, _ = os.path.split(path)
+    # This signifies that we've reached / and gone as far up as we can
+    if parent == path:
+      return None
+
+    return search_up(parent)
+
+  return search_up(os.getcwd())
+
+
+def get_catkin_workspace(log):
+  '''Utility function to find the catkin workspace root and exit with failure if none can be
+  found'''
+  workspace_root = find_path(WORKSPACE_ROOT_PATTERN)
+  src_path = find_path(WORKSPACE_SRC_PATTERN)
+  if workspace_root:
+    workspace_root, _ = os.path.split(workspace_root)
+  elif src_path:
+    workspace_root, _ = os.path.split(src_path)
+  else:
+    log.error("Can't find the catkin workspace root! Are you running in a catkin workspace?")
+    sys.exit(EXIT_WORKSPACE)
+  return workspace_root
+
+
+def self_update(log):
+  '''Fetch the most up-to-date version of the simulator tool'''
+  log.info('Checking version signature for simulator-tool')
+  current_sig = sub_run(
+      'wget -qO- https://rpal.cs.cornell.edu/foundations/hw/simulator-tool.sig'.split(),
+      stdout=PIPE,
+      universal_newlines=True,
+      check=True
+  ).stdout
+  sigs_dir = find_path(SIGS_PATTERN)
+  if not sigs_dir or not os.path.isdir(sigs_dir):
+    log.info('No signatures directory found; creating in the current directory')
+    os.mkdir('.sigs')
+    with open('.sigs/simulator-tool', 'w') as sigfile:
+      sigfile.write('none')
+    sigs_dir = '.sigs'
+
+  with open('{}/simulator-tool'.format(sigs_dir), 'r') as sigfile:
+    old_sig = sigfile.readline()
+  if old_sig != current_sig:
+    log.info('Version of simulator-tool appears to be outdated. Downloading current version.')
+    tool_path = find_path(TOOL_PATTERN)
+    os.remove(tool_path)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+      url = 'https://rpal.cs.cornell.edu/foundations/hw/simulator-tool'
+      download_future = executor.submit(
+          lambda: sub_run('wget -O {} {}'.format(tool_path, url).split(), check=True))
+    log.info('Downloading version signature for simulator-tool')
+    sub_run('wget -O {}/simulator-tool {}.sig'.format(sigs_dir, url).split(), check=True)
+    wait([download_future])
+    st = os.stat(tool_path)
+    os.chmod(tool_path, st.st_mode | stat.S_IEXEC)
+    log.warning('Done downloading the simulator tool. Please run the new version!')
+    sys.exit(EXIT_UPDATED)
+  else:
+    log.info('Version of simulator-tool is up to date; proceeding')
+
+
+def download_assignment(log, assignment_name):
+  '''Downloads and extracts the provided files for the given assignment'''
+  url = 'https://rpal.cs.cornell.edu/foundations/hw/assignments/' + assignment_name
+  log.info('Downloading and extracting archive for {}'.format(assignment_name))
+
+  workspace_root = get_catkin_workspace(log)
+  src_path = os.path.join(workspace_root, 'src')
+
+  def unzip(future):
+    '''Helper function to untar and extract the downloaded code'''
+    if not future.exception():
+      sub_run('tar xzvf {}.tar.gz -C {}/foundations_{}'
+              .format(assignment_name, src_path, assignment_name)
+              .split())
+    else:
+      raise future.exception()
+
+  with ThreadPoolExecutor(max_workers=1) as executor:
+    download_future = executor.submit(lambda: sub_run(
+        'wget -O {}/{}.tar.gz {}.tar.gz'.format(workspace_root, assignment_name, url).split(),
+        check=True))
+    download_future.add_done_callback(unzip)
+  log.info('Downloading version signature for {}'.format(assignment_name))
+  sigs_dir = find_path(SIGS_PATTERN)
+  sub_run('wget -O {}/{} {}.sig'.format(sigs_dir, assignment_name, url).split(), check=True)
+  wait([download_future])
+  log.info('Done downloading and extracting materials for {}'.format(assignment_name))
+
+
+def remove_assignment(log, assignment_name):
+  '''Delete an old copy of the code'''
+  log.info('Deleting old assignment archive and directory')
+  workspace_root = get_catkin_workspace(log)
+  src_path = os.path.join(workspace_root, 'src')
+  shutil.rmtree('{}/foundations_{}'.format(src_path, assignment_name))
+  os.remove('{}/{}.tar.gz'.format(workspace_root, assignment_name))
+
+
+def fetch_assignment(log, assignment_name):
+  '''Fetch the most up-to-date version of the assignment specified'''
+  url_format = 'https://rpal.cs.cornell.edu/foundations/hw/assignments/{}.sig'
+  # Check if assignment has already been fetched and is up to date
+  workspace_root = get_catkin_workspace(log)
+  src_path = os.path.join(workspace_root, 'src')
+  sigs_dir = find_path(SIGS_PATTERN)
+  if os.path.isdir('{}/foundations_{}'.format(src_path, assignment_name)):
+    log.info('Found directory for {}'.format(assignment_name))
+    log.info('Checking version signature for {}'.format(assignment_name))
+    current_sig = sub_run(
+        'wget -qO- {}'.format(url_format.format(assignment_name)).split(),
+        stdout=PIPE,
+        universal_newlines=True, check=True
+    ).stdout
+    with open('{}/{}'.format(sigs_dir, assignment_name), 'r') as sigfile:
+      old_sig = sigfile.readline()
+    if old_sig != current_sig:
+      log.info('Version of {} appears to be outdated. Downloading current version.'
+               .format(assignment_name))
+      remove_assignment(log, assignment_name)
+      os.mkdir('{}/foundations_{}'.format(src_path, assignment_name))
+      download_assignment(log, assignment_name)
+    else:
+      log.info('Version of {} is up to date; proceeding'.format(assignment_name))
+  else:
+    log.info('Found no existing files for {}. Downloading current version.'
+             .format(assignment_name))
+    try:
+      os.mkdir('{}/foundations_{}'.format(src_path, assignment_name))
+    except FileNotFoundError as err:
+      log.error(err)
+      log.error(
+          "Couldn't make the assignment source directory. Are you running in a catkin workspace?")
+      sys.exit(EXIT_WORKSPACE)
+    if not sigs_dir:
+      os.mkdir('{}/.sigs'.format(workspace_root))
+    download_assignment(log, assignment_name)
+
+
+def default_build(log):
+  '''Build the provided code with catkin_make'''
+  log.info('Running catkin_make in workspace directory')
+  workspace_root = get_catkin_workspace(log)
+  # We have to run as a shell process in order for catkin to be invoked in the correct directory
+  sub_run('catkin_make', shell=True, check=True, cwd=workspace_root)
+
+
+def build_assignment(log, assignment_name):
+  '''Run the builder for the provided code'''
+  workspace_root = get_catkin_workspace(log)
+  src_path = os.path.join(workspace_root, 'src')
+  with open('{}/foundations_{}/config.toml'.format(src_path, assignment_name), 'rb') as config:
+    hw_config = pytoml.load(config)
+  if 'build' not in hw_config:
+    default_build(log)
+  else:
+    sub_run(hw_config['build'], check=True, shell=True)
+  log.info('Building done. {} is ready to run'.format(assignment_name))
+  log.info('Be sure to source the workspace setup file!')
+
+
+def run_ros(log, assignment_name, problem):
+  '''Use roslaunch to run the provided code (if any exists) for the given problem'''
+  log.info('Sourcing the setup file')
+  workspace_root = get_catkin_workspace(log)
+  devel_path = os.path.join(workspace_root, 'devel', 'setup.bash')
+  bash_proc = Popen(
+      ['bash', '-c', 'source {} && env'.format(devel_path)],
+      stdout=PIPE)
+  new_env = os.environ.copy()
+  for line in bash_proc.stdout:
+    line = line.decode('utf-8')
+    (key, _, value) = line.partition('=')
+    new_env[key] = value.strip()
+
+  bash_proc.communicate()
+  log.info('Running ROS with the launch file for {}'.format(assignment_name))
+  ros_proc = Popen(
+      shlex.split('roslaunch foundations_{} {}.launch'.format(assignment_name, problem)),
+      stdin=None,
+      stdout=None,
+      stderr=None,
+      env=new_env)
+  # Run for 60 seconds max
+  try:
+    ros_proc.wait(timeout=60)
+  except TimeoutExpired:
+    log.info('Wrapping up execution...')
+    os.killpg(os.getpgid(ros_proc.pid), signal.SIGTERM)
+
+
+def run_assignment(log, assignment_name, problem):
+  '''Run the provided code for the given problem'''
+  log.info('Running test driver for {}'.format(assignment_name))
+  workspace_root = get_catkin_workspace(log)
+  src_path = os.path.join(workspace_root, 'src')
+  with open('{}/foundations_{}/config.toml'.format(src_path, assignment_name), 'rb') as config:
+    hw_config = pytoml.load(config)
+  if 'run' not in hw_config:
+    run_ros(log, assignment_name, problem)
+  else:
+    sub_run("{} {}".format(hw_config['run'], problem), check=True, shell=True)
+  log.info('Done with execution')
+
+
+@click.group()
+def cli():
+  '''The main CLI group'''
+  pass
+
+
+# TODO: Add no-check option
+@cli.command()
+@click.argument('assignment')
+@click.argument('problem')
+def run(assignment, problem):
+  '''Build (if necessary) and run the given assignment problem.'''
+  logger = logging.getLogger('simulator-run')
+  logger.setLevel(logging.INFO)
+  fetch_assignment(logger, assignment)
+  build_assignment(logger, assignment)
+  run_assignment(logger, assignment, problem)
+
+
+# TODO: Add no-check option
+@cli.command()
+@click.argument('assignment')
+def build(assignment):
+  '''Build the given assignment'''
+  logger = logging.getLogger('simulator-build')
+  logger.setLevel(logging.INFO)
+  fetch_assignment(logger, assignment)
+  build_assignment(logger, assignment)
+
+
+@cli.command()
+@click.argument('assignment')
+def get(assignment):
+  '''Download the given assignment'''
+  logger = logging.getLogger('simulator-get')
+  logger.setLevel(logging.INFO)
+  fetch_assignment(logger, assignment)
+
+
+if __name__ == '__main__':
+  logger = logging.getLogger('simulator-update')
+  self_update(logger)
+  cli()
