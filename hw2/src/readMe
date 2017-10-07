@@ -1,5 +1,5 @@
 
 1. This Assignment is discussed with Haoyuan Zheng, Yuan Zhou and Siyuan Hu.
 2. coding_2.pdf contains solutions to p1a and p2a.
-3. In order to call the p3b service I wrote another p3b_client.py. You can comment out the line refering to
-   p3b_client in p3b.launch. 
+3. p2b.launch only computes Jacobian matrix to my understanding, so there will be no moving effects of the KUKA
+   youbot in simulator. Please manually check result jacobian matrices.
