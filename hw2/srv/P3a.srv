@@ -1,0 +1,4 @@
+geometry_msgs/Point goal_point
+---
+foundations_hw2/JointAngles goal_configs
+
